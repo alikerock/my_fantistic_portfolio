@@ -7,7 +7,7 @@ on:
 permissions:
   contents: read
   pull-requests: write
-  projects: write
+  repository-projects: write 
 
 jobs:
   project_v2_route:
