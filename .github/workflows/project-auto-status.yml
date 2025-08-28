@@ -64,7 +64,7 @@ jobs:
 
             const findOpt = (name) => {
               const opt = statusField.options.find(o => o.name === name);
-              if (!opt) core.setFailed(\`Status option not found: \${name}\`);
+              if (!opt) core.setFailed(`Status option not found: ${name}`);
               return opt.id;
             };
 
