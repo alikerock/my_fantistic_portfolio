@@ -7,7 +7,7 @@ on:
 permissions:
   contents: read
   pull-requests: write
-  repository-projects: write 
+  repository-projects: write
 
 jobs:
   project_v2_route:
@@ -49,7 +49,7 @@ jobs:
                 }
               }`;
             const data = await github.graphql(q, { owner, projectNumber });
-            const project = data.repositoryOwner.projectV2;
+            const project = data.user.projectV2;
             if (!project) core.setFailed("Project not found.");
             const projectId = project.id;
 
