@@ -1,42 +1,44 @@
-name: Project v2 Auto Status (Simplified)
+name: Project v2 Auto Status (User board, Classic PAT)
 
 on:
   pull_request:
-    types: [opened, reopened, ready_for_review, converted_to_draft, closed]
+    types: [opened, reopened, converted_to_draft, ready_for_review, closed]
 
+# This block controls only the default GITHUB_TOKEN. We actually use a Classic PAT secret below.
 permissions:
   contents: read
-  pull-requests: write
-  repository-projects: write
+  pull-requests: read
 
 jobs:
   project_v2_route:
     runs-on: ubuntu-latest
+
     steps:
       - name: Set variables
         id: vars
         run: |
-          echo "OWNER=alikerock" >> $GITHUB_OUTPUT          # 사용자/조직
-          echo "PROJECT_NUMBER=3" >> $GITHUB_OUTPUT         # 보드 번호 (URL에서 projects/3)
+          echo "OWNER=alikerock" >> $GITHUB_OUTPUT            # GitHub username owning the Project v2 board
+          echo "PROJECT_NUMBER=3" >> $GITHUB_OUTPUT           # projects/<NUMBER> from the board URL
           echo "STATUS_TODO=Todo" >> $GITHUB_OUTPUT
           echo "STATUS_INPROGRESS=In Progress" >> $GITHUB_OUTPUT
           echo "STATUS_DONE=Done" >> $GITHUB_OUTPUT
 
       - name: Add PR to Project and update Status
+        # We use Classic PAT (scopes: repo, project) stored as repository secret PROJECTS_TOKEN
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ secrets.PROJECTS_TOKEN }}
           script: |
             const owner = "${{ steps.vars.outputs.OWNER }}";
             const projectNumber = parseInt("${{ steps.vars.outputs.PROJECT_NUMBER }}", 10);
 
-            // 1. 프로젝트와 Status 옵션 조회
+            // 1) Look up the user-owned Project v2
             const q = `
               query($owner: String!, $projectNumber: Int!) {
-                repositoryOwner(login: $owner) {
+                user(login: $owner) {
                   projectV2(number: $projectNumber) {
                     id
-                    fields(first: 20) {
+                    fields(first: 50) {
                       nodes {
                         ... on ProjectV2SingleSelectField {
                           id
@@ -48,23 +50,28 @@ jobs:
                   }
                 }
               }`;
-            const data = await github.graphql(q, { owner, projectNumber });
-            const project = data.repositoryOwner.projectV2;
-            if (!project) core.setFailed("Project not found.");
-            const projectId = project.id;
 
+            const data = await github.graphql(q, { owner, projectNumber });
+            const project = data.user?.projectV2;
+            if (!project) {
+              core.setFailed("Project v2 not found. Check OWNER/PROJECT_NUMBER and token scopes (need classic PAT with 'repo' and 'project').");
+              return;
+            }
+
+            const projectId = project.id;
             const statusField = project.fields.nodes.find(f => f.name === "Status");
-            if (!statusField) core.setFailed("No 'Status' field found.");
+            if (!statusField) core.setFailed("Status field not found on the Project board.");
+
             const findOpt = (name) => {
               const opt = statusField.options.find(o => o.name === name);
-              if (!opt) core.setFailed(`Option '${name}' not found in Status.`);
+              if (!opt) core.setFailed(\`Status option not found: \${name}\`);
               return opt.id;
             };
 
-            // 2. 현재 PR nodeId
+            // 2) Current PR node id
             const nodeId = context.payload.pull_request.node_id;
 
-            // 3. 프로젝트에 PR 추가
+            // 3) Ensure the PR exists as an item on the board
             const addMu = `
               mutation($projectId: ID!, $contentId: ID!) {
                 addProjectV2ItemById(input: { projectId: $projectId, contentId: $contentId }) {
@@ -74,40 +81,46 @@ jobs:
             const addRes = await github.graphql(addMu, { projectId, contentId: nodeId });
             const itemId = addRes.addProjectV2ItemById.item.id;
 
-            // 4. 이벤트 → Status 매핑
+            // 4) Map event -> target Status
+            const S = {
+              TODO: "${{ steps.vars.outputs.STATUS_TODO }}",
+              INPROGRESS: "${{ steps.vars.outputs.STATUS_INPROGRESS }}",
+              DONE: "${{ steps.vars.outputs.STATUS_DONE }}",
+            };
+
             let target = null;
-            if (["opened","reopened","converted_to_draft"].includes(context.payload.action)) {
-              target = "${{ steps.vars.outputs.STATUS_INPROGRESS }}";
-            }
-            if (context.payload.action === "ready_for_review") {
-              target = "${{ steps.vars.outputs.STATUS_TODO }}"; // 리뷰 준비 → Todo
-            }
-            if (context.payload.action === "closed") {
-              target = context.payload.pull_request.merged
-                ? "${{ steps.vars.outputs.STATUS_DONE }}"
-                : "${{ steps.vars.outputs.STATUS_TODO }}";
-            }
-            if (!target) {
-              core.info("No status update required.");
-              return;
+            const action = context.payload.action;
+
+            // Simple mapping:
+            // - opened/reopened/converted_to_draft → In Progress
+            // - ready_for_review → Todo
+            // - closed (merged) → Done ; closed (not merged) → Todo
+            if (["opened", "reopened", "converted_to_draft"].includes(action)) target = S.INPROGRESS;
+            if (action === "ready_for_review") target = S.TODO;
+            if (action === "closed") {
+              target = context.payload.pull_request.merged ? S.DONE : S.TODO;
             }
 
-            // 5. Status 업데이트
-            const update = `
+            if (!target) { core.info("No status change required for this event."); return; }
+
+            // 5) Update the Status field
+            const updateMu = `
               mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optId: String!) {
-                updateProjectV2ItemFieldValue(input:{
+                updateProjectV2ItemFieldValue(input: {
                   projectId: $projectId,
                   itemId: $itemId,
                   fieldId: $fieldId,
-                  value:{ singleSelectOptionId: $optId }
+                  value: { singleSelectOptionId: $optId }
                 }) {
                   projectV2Item { id }
                 }
               }`;
-            await github.graphql(update, {
+
+            await github.graphql(updateMu, {
               projectId,
               itemId,
               fieldId: statusField.id,
               optId: findOpt(target)
             });
-            core.info(`Status updated to '${target}'`);
+
+            core.info(\`Status updated to '\${target}'");
